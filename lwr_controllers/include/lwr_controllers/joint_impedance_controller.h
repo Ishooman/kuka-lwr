@@ -4,10 +4,8 @@
 
 #include "KinematicChainControllerBase.h"
 
-#include <visualization_msgs/Marker.h>
-#include <std_msgs/Float64MultiArray.h>
-
-#include <boost/scoped_ptr.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 /*
 	tau_cmd_ = K_*(q_des_ - q_msr_) + D_*dotq_msr_ + G(q_msr_)
@@ -17,29 +15,34 @@
 namespace lwr_controllers
 {
 
-	class JointImpedanceController: public controller_interface::KinematicChainControllerBase<hardware_interface::EffortJointInterface>
+	class JointImpedanceController: public controller_interface::KinematicChainControllerBase
 	{
 	public:
 
 		JointImpedanceController();
 		~JointImpedanceController();
 
-		bool init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n);
+		CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
+		CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;
 
-		void starting(const ros::Time& time);
+		controller_interface::return_type update(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+		void command(const std_msgs::msg::Float64MultiArray::SharedPtr &msg);
+		void setParam(const std_msgs::msg::Float64MultiArray::SharedPtr &msg, KDL::JntArray* array, std::string s);
 
-		void update(const ros::Time& time, const ros::Duration& period);
-		void command(const std_msgs::Float64MultiArray::ConstPtr &msg);
-		void setParam(const std_msgs::Float64MultiArray::ConstPtr &msg, KDL::JntArray* array, std::string s);
-        
 	private:
 
-		ros::Subscriber sub_stiffness_, sub_damping_, sub_add_torque_;
-		ros::Subscriber sub_posture_;
+		using MsgType = std_msgs::msg::Float64MultiArray;
+
+		rclcpp::Subscription<MsgType>::SharedPtr sub_stiffness_, sub_damping_, sub_add_torque_;
+		rclcpp::Subscription<MsgType>::SharedPtr sub_posture_;
+		controller_interface::CommandInbox<MsgType> stiffness_inbox_, damping_inbox_, add_torque_inbox_, posture_inbox_;
 
 		KDL::JntArray q_des_;
 		KDL::JntArray tau_des_;
 		KDL::JntArray K_, D_;
+
+		// gains from the yaml file, NaN if not set
+		double stiffness_gains_, damping_gains_;
 
 	};
 

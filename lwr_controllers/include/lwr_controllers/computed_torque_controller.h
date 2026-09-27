@@ -3,30 +3,29 @@
 
 #include "KinematicChainControllerBase.h"
 
-#include <std_msgs/Float64MultiArray.h>
-
-#include <boost/scoped_ptr.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 namespace lwr_controllers
 {
-	class ComputedTorqueController: public controller_interface::KinematicChainControllerBase<hardware_interface::EffortJointInterface>
+	class ComputedTorqueController: public controller_interface::KinematicChainControllerBase
 	{
 	public:
 
 		ComputedTorqueController();
 		~ComputedTorqueController();
 
-		bool init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n);
-		void starting(const ros::Time& time);
-		void update(const ros::Time& time, const ros::Duration& period);
-		void command(const std_msgs::Float64MultiArray::ConstPtr &msg);
-		void set_gains(const std_msgs::Float64MultiArray::ConstPtr &msg);
+		CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
+		CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;
+		controller_interface::return_type update(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+		void command(const std_msgs::msg::Float64MultiArray::SharedPtr &msg);
+		void set_gains(const std_msgs::msg::Float64MultiArray::SharedPtr &msg);
 
 	private:
 
-		ros::Subscriber sub_posture_;
-		ros::Subscriber sub_gains_;
-        
+		rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_posture_;
+		rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_gains_;
+		controller_interface::CommandInbox<std_msgs::msg::Float64MultiArray> posture_inbox_, gains_inbox_;
+
 		KDL::JntArray cmd_states_;
 		int cmd_flag_;	// discriminate if a user command arrived
 		double lambda;	// flattening coefficient of tanh
@@ -39,7 +38,7 @@ namespace lwr_controllers
 		KDL::JntArray C_, G_;	//Coriolis and Gravitational matrices
 		KDL::JntArray Kp_, Kv_;	//Position and Velocity gains
 
-		boost::scoped_ptr<KDL::ChainDynParam> id_solver_;
+		std::unique_ptr<KDL::ChainDynParam> id_solver_;
 
 	};
 }

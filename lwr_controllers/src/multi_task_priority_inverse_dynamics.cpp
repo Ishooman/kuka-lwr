@@ -1,4 +1,4 @@
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <math.h>
 #include <Eigen/LU>
@@ -7,14 +7,15 @@
 #include <utils/skew_symmetric.h>
 #include <lwr_controllers/multi_task_priority_inverse_dynamics.h>
 
-namespace lwr_controllers 
+namespace lwr_controllers
 {
 	MultiTaskPriorityInverseDynamics::MultiTaskPriorityInverseDynamics() {}
 	MultiTaskPriorityInverseDynamics::~MultiTaskPriorityInverseDynamics() {}
 
-	bool MultiTaskPriorityInverseDynamics::init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n)
+	controller_interface::CallbackReturn MultiTaskPriorityInverseDynamics::on_configure(const rclcpp_lifecycle::State & previous_state)
 	{
-        KinematicChainControllerBase<hardware_interface::EffortJointInterface>::init(robot, n);
+        if (PIDKinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
 
 		jnt_to_jac_solver_.reset(new KDL::ChainJntToJacSolver(kdl_chain_));
 		id_solver_.reset(new KDL::ChainDynParam(kdl_chain_,gravity_));
@@ -30,18 +31,24 @@ namespace lwr_controllers
 		C_.resize(kdl_chain_.getNrOfJoints());
 		G_.resize(kdl_chain_.getNrOfJoints());
 
-		sub_command_ = nh_.subscribe("command", 1, &MultiTaskPriorityInverseDynamics::command, this);
+		sub_command_ = get_node()->create_subscription<lwr_controllers::msg::MultiPriorityTask>("~/command", 1,
+			[this](const lwr_controllers::msg::MultiPriorityTask::SharedPtr msg) { command_inbox_.write(msg); });
 
-		pub_error_ = nh_.advertise<std_msgs::Float64MultiArray>("error", 1000);
-		pub_marker_ = nh_.advertise<visualization_msgs::MarkerArray>("marker",1000);
+		pub_error_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/error", 1000);
+		pub_marker_ = get_node()->create_publisher<visualization_msgs::msg::MarkerArray>("~/marker",1000);
+		rt_pub_error_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_error_);
+		rt_pub_marker_ = std::make_shared<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>>(pub_marker_);
 
-		return true;
+		return CallbackReturn::SUCCESS;
 	}
 
-	void MultiTaskPriorityInverseDynamics::starting(const ros::Time& time)
+	controller_interface::CallbackReturn MultiTaskPriorityInverseDynamics::on_activate(const rclcpp_lifecycle::State & previous_state)
 	{
+        if (PIDKinematicChainControllerBase::on_activate(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -55,13 +62,20 @@ namespace lwr_controllers
 
     	first_step_ = 0;
     	cmd_flag_ = 0;
+    	command_inbox_.reset();
 
+    	return CallbackReturn::SUCCESS;
 	}
 
-	void MultiTaskPriorityInverseDynamics::update(const ros::Time& time, const ros::Duration& period)
+	controller_interface::return_type MultiTaskPriorityInverseDynamics::update(const rclcpp::Time& time, const rclcpp::Duration& period)
 	{
+		(void)time;
+
+		if (auto msg = command_inbox_.take())
+			command(msg);
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -69,7 +83,7 @@ namespace lwr_controllers
 
     	// clearing error msg before publishing
     	msg_err_.data.clear();
-    	
+
     	if (cmd_flag_)
     	{
 			// computing Inertia, Coriolis and Gravity matrices
@@ -78,12 +92,12 @@ namespace lwr_controllers
 	    	id_solver_->JntToGravity(joint_msr_states_.q, G_);
 	    	// deleting gravity contribute
 	    	G_.data.setZero();
-	    	
+
 	    	// computing the inverse of M_ now, since it will be used often
 	    	pseudo_inverse(M_.data,M_inv_,false);
 
     		// resetting N and tau(t=0) for the highest priority task
-    		N_trans_ = I_;	
+    		N_trans_ = I_;
     		SetToZero(tau_);
 
     		for (int index = 0; index < ntasks_; index++)
@@ -95,11 +109,11 @@ namespace lwr_controllers
 		    	{
 		    		J_last_[index] = J_;
 		    		first_step_ = 0;
-		    		return;
+		    		return controller_interface::return_type::OK;
 		    	}
 
 		    	// computing the derivative of Jacobian J_dot(q) through numerical differentiation
-		    	J_dot_.data = (J_.data - J_last_[index].data)/period.toSec();
+		    	J_dot_.data = (J_.data - J_last_[index].data)/period.seconds();
 
 		    	// computing forward kinematics
 		    	fk_pos_solver_->JntToCart(joint_msr_states_.q,x_,links_index_[index]);
@@ -110,7 +124,7 @@ namespace lwr_controllers
 		    	// computing end-effector position/orientation error w.r.t. desired frame
 		    	x_err_ = diff(x_,x_des_[index]);
 
-		    	x_dot_ = J_.data*joint_msr_states_.qdot.data;    	
+		    	x_dot_ = J_.data*joint_msr_states_.qdot.data;
 
 		    	// setting error reference
 		    	for(int i = 0; i < e_ref_.size(); i++)
@@ -137,46 +151,46 @@ namespace lwr_controllers
 		    	{
 			    	if (Equal(x_,x_des_[index],0.01))
 			    	{
-			    		ROS_INFO("Task %d on target",index);
+			    		RCLCPP_INFO(logger(), "Task %d on target",index);
 			    		on_target_flag_[index] = true;
 			    		if (index == (ntasks_ - 1))
 			    			cmd_flag_ = 0;
 			    	}
 			    }
- 
+
 		    	// updating N_^T
 		    	N_trans_ = N_trans_ - J_.data.transpose()*lambda_*J_.data*M_inv_;
 
 		    	// saving J_ of the last step
 		    	J_last_[index] = J_;
-		    }		
+		    }
     	}
 
     	// set controls for joints
-    	for (int i = 0; i < joint_handles_.size(); i++)
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
     	{
     		if(cmd_flag_)
     			joint_handles_[i].setCommand(tau_(i));
     		else
-    			joint_handles_[i].setCommand(PIDs_[i].computeCommand(joint_des_states_.q(i) - joint_msr_states_.q(i),period));
+    			joint_handles_[i].setCommand(computeCommand(PIDs_[i], joint_des_states_.q(i) - joint_msr_states_.q(i),period));
     	}
 
     	// publishing markers for visualization in rviz
-    	pub_marker_.publish(msg_marker_);
+    	publishRT(rt_pub_marker_, msg_marker_);
     	msg_id_++;
 
 	    // publishing error for all tasks as an array of ntasks*6
-	    pub_error_.publish(msg_err_);
-	    ros::spinOnce();
+	    publishRT(rt_pub_error_, msg_err_);
 
+	    return controller_interface::return_type::OK;
 	}
 
-	void MultiTaskPriorityInverseDynamics::command(const lwr_controllers::MultiPriorityTask::ConstPtr &msg)
+	void MultiTaskPriorityInverseDynamics::command(const lwr_controllers::msg::MultiPriorityTask::SharedPtr &msg)
 	{
 		if (msg->links.size() == msg->tasks.size()/6)
 		{
 			ntasks_ = msg->links.size();
-			ROS_INFO("Number of tasks: %d",ntasks_);
+			RCLCPP_INFO(logger(), "Number of tasks: %d",ntasks_);
 			// Dynamically resize desired postures and links index when a message arrives
 			x_des_.resize(ntasks_);
 			links_index_.resize(ntasks_);
@@ -191,14 +205,15 @@ namespace lwr_controllers
 			{
 					if (msg->links[i] == -1)	// adjust index
 						links_index_[i] = msg->links[i];
-					else if (msg->links[i] >= 1 && msg->links[i] <=joint_handles_.size())
+					else if (msg->links[i] >= 1 && msg->links[i] <= (int)joint_handles_.size())
 						links_index_[i] = msg->links[i] + 1;
 					else
 					{
-						ROS_INFO("Links index must be within 1 and %ld. (-1 is end-effector)",joint_handles_.size());
+						RCLCPP_INFO(logger(), "Links index must be within 1 and %ld. (-1 is end-effector)",joint_handles_.size());
+						ntasks_ = 0;
 						return;
 					}
-					
+
 					x_des_[i] = KDL::Frame(
 									KDL::Rotation::RPY(msg->tasks[i*6 + 3],
 													   msg->tasks[i*6 + 4],
@@ -212,33 +227,33 @@ namespace lwr_controllers
 
 			first_step_ = 1;
 			cmd_flag_ = 1;
-		}	
+		}
 		else
 		{
-			ROS_INFO("The number of links index and tasks must be the same");
-			ROS_INFO("Tasks parameters are [x,y,x,roll,pitch,yaw]");
+			RCLCPP_INFO(logger(), "The number of links index and tasks must be the same");
+			RCLCPP_INFO(logger(), "Tasks parameters are [x,y,x,roll,pitch,yaw]");
 			return;
 		}
-		
+
 	}
 
 	void MultiTaskPriorityInverseDynamics::set_marker(KDL::Frame x, int index, int id)
-	{			
+	{
 				sstr_.str("");
 				sstr_.clear();
 
 				if (links_index_[index] == -1)
-					sstr_<<"end_effector";		
+					sstr_<<"end_effector";
 				else
 					sstr_<<"link_"<<(links_index_[index]-1);
 
 
 				msg_marker_.markers[index].header.frame_id = "world";
-				msg_marker_.markers[index].header.stamp = ros::Time();
+				msg_marker_.markers[index].header.stamp = builtin_interfaces::msg::Time();
 				msg_marker_.markers[index].ns = sstr_.str();
 				msg_marker_.markers[index].id = id;
-				msg_marker_.markers[index].type = visualization_msgs::Marker::SPHERE;
-				msg_marker_.markers[index].action = visualization_msgs::Marker::ADD;
+				msg_marker_.markers[index].type = visualization_msgs::msg::Marker::SPHERE;
+				msg_marker_.markers[index].action = visualization_msgs::msg::Marker::ADD;
 				msg_marker_.markers[index].pose.position.x = x.p(0);
 				msg_marker_.markers[index].pose.position.y = x.p(1);
 				msg_marker_.markers[index].pose.position.z = x.p(2);
@@ -252,8 +267,8 @@ namespace lwr_controllers
 				msg_marker_.markers[index].color.a = 1.0;
 				msg_marker_.markers[index].color.r = 0.0;
 				msg_marker_.markers[index].color.g = 1.0;
-				msg_marker_.markers[index].color.b = 0.0;	
+				msg_marker_.markers[index].color.b = 0.0;
 	}
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::MultiTaskPriorityInverseDynamics, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::MultiTaskPriorityInverseDynamics, controller_interface::ControllerInterface)

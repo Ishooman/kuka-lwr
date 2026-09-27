@@ -1,6 +1,8 @@
-<package format="2">
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>single_lwr_example</name>
-  <version>0.1.0</version>
+  <version>2.0.0</version>
   <description>The single_lwr_example package</description>
 
   <maintainer email="marco.esposito@tum.de">Marco Esposito</maintainer>
@@ -8,16 +10,17 @@
 
   <license>BSD</license>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
   <!-- main meta package dependency -->
   <exec_depend>kuka_lwr</exec_depend>
 
   <!-- local packages -->
   <exec_depend>single_lwr_robot</exec_depend>
+  <exec_depend>single_lwr_launch</exec_depend>
   <exec_depend>single_lwr_moveit</exec_depend>
 
   <export>
-    <metapackage/>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

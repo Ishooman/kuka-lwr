@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+	<!--
+	ros2_control description of a KUKA LWR 4+ (replaces the ROS 1 transmissions).
+
+	Values of hardware_interface
+	  gazebo = lwr_hw/LWRHWGazebo, loaded by the gazebo_ros2_control plugin (see kuka_lwr.gazebo.xacro)
+	  fri    = lwr_hw/LWRHWFRI, the real robot through the KUKA FRI (port, ip)
+	  fril   = lwr_hw/LWRHWFRIL, the real robot through the Standford FRI library (init_file)
+	  mock   = mock_components/GenericSystem, no robot at all (e.g. for the MoveIt demo)
+
+	NOTE do not use colons in the comments of the robot description, gazebo_ros2_control passes it as a
+	command line parameter and the value is then parsed as YAML.
+
+	The lwr_hw interfaces export, for each joint, the command interfaces position, effort, stiffness, damping
+	and set_point, and the state interfaces position, velocity, effort, stiffness and damping, plus the cartesian
+	variables of the KRC in the ${name}_cart gpio.
+	-->
+
+	<xacro:macro name="kuka_lwr_joint_interfaces" params="joint_name mock">
+		<joint name="${joint_name}">
+			<command_interface name="position"/>
+			<xacro:unless value="${mock}">
+				<command_interface name="effort"/>
+				<command_interface name="stiffness"/>
+				<command_interface name="damping"/>
+				<command_interface name="set_point"/>
+			</xacro:unless>
+			<state_interface name="position">
+				<param name="initial_value">0.0</param>
+			</state_interface>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+			<xacro:unless value="${mock}">
+				<state_interface name="stiffness"/>
+				<state_interface name="damping"/>
+			</xacro:unless>
+		</joint>
+	</xacro:macro>
+
+	<xacro:macro name="kuka_lwr_cart_interfaces" params="items">
+		<xacro:if value="${items}">
+			<command_interface name="${items[0]}"/>
+			<state_interface name="${items[0]}"/>
+			<xacro:kuka_lwr_cart_interfaces items="${items[1:]}"/>
+		</xacro:if>
+	</xacro:macro>
+
+	<xacro:macro name="kuka_lwr_ros2_control" params="name hardware_interface:=gazebo port:=49939 ip:=192.168.0.10 init_file:=''">
+
+		<xacro:property name="mock" value="${hardware_interface == 'mock'}"/>
+
+		<ros2_control name="${name}_lwr_hw" type="system">
+			<hardware>
+				<xacro:if value="${hardware_interface == 'gazebo'}">
+					<plugin>lwr_hw/LWRHWGazebo</plugin>
+				</xacro:if>
+				<xacro:if value="${hardware_interface == 'fri'}">
+					<plugin>lwr_hw/LWRHWFRI</plugin>
+					<param name="port">${port}</param>
+					<param name="ip">${ip}</param>
+				</xacro:if>
+				<xacro:if value="${hardware_interface == 'fril'}">
+					<plugin>lwr_hw/LWRHWFRIL</plugin>
+					<param name="file">${init_file}</param>
+				</xacro:if>
+				<xacro:if value="${mock}">
+					<plugin>mock_components/GenericSystem</plugin>
+				</xacro:if>
+				<!-- this name MUST match the name you give to the arm in the URDF instance -->
+				<param name="name">${name}</param>
+				<param name="root_name">${name}_base_link</param>
+				<param name="tip_name">${name}_7_link</param>
+			</hardware>
+
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a1_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a2_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_e1_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a3_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a4_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a5_joint" mock="${mock}"/>
+			<xacro:kuka_lwr_joint_interfaces joint_name="${name}_a6_joint" mock="${mock}"/>
+
+			<xacro:unless value="${mock}">
+				<gpio name="${name}_cart">
+					<xacro:kuka_lwr_cart_interfaces items="${['rot_xx', 'rot_yx', 'rot_zx', 'pos_x', 'rot_xy', 'rot_yy', 'rot_zy', 'pos_y', 'rot_xz', 'rot_yz', 'rot_zz', 'pos_z',
+					                                          'X_stiffness', 'X_damping', 'X_wrench', 'Y_stiffness', 'Y_damping', 'Y_wrench',
+					                                          'Z_stiffness', 'Z_damping', 'Z_wrench', 'A_stiffness', 'A_damping', 'A_wrench',
+					                                          'B_stiffness', 'B_damping', 'B_wrench', 'C_stiffness', 'C_damping', 'C_wrench']}"/>
+				</gpio>
+			</xacro:unless>
+		</ros2_control>
+
+	</xacro:macro>
+
+</robot>

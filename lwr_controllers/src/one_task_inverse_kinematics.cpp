@@ -3,23 +3,23 @@
 #include <utils/pseudo_inversion.h>
 #include <utils/skew_symmetric.h>
 
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <Eigen/LU>
 
 #include <math.h>
 
-namespace lwr_controllers 
+namespace lwr_controllers
 {
-    OneTaskInverseKinematics::OneTaskInverseKinematics() {}
+    OneTaskInverseKinematics::OneTaskInverseKinematics() : KinematicChainControllerBase(CommandType::POSITION) {}
     OneTaskInverseKinematics::~OneTaskInverseKinematics() {}
 
-    bool OneTaskInverseKinematics::init(hardware_interface::PositionJointInterface *robot, ros::NodeHandle &n)
+    controller_interface::CallbackReturn OneTaskInverseKinematics::on_configure(const rclcpp_lifecycle::State & previous_state)
     {
-        if( !(KinematicChainControllerBase<hardware_interface::PositionJointInterface>::init(robot, n)) )
+        if( KinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS )
         {
-            ROS_ERROR("Couldn't initilize OneTaskInverseKinematics controller.");
-            return false;
+            RCLCPP_ERROR(logger(), "Couldn't initilize OneTaskInverseKinematics controller.");
+            return CallbackReturn::ERROR;
         }
 
         jnt_to_jac_solver_.reset(new KDL::ChainJntToJacSolver(kdl_chain_));
@@ -30,8 +30,19 @@ namespace lwr_controllers
         q_cmd_.resize(kdl_chain_.getNrOfJoints());
         J_.resize(kdl_chain_.getNrOfJoints());
 
+        sub_command_ = get_node()->create_subscription<lwr_controllers::msg::PoseRPY>("~/command", 1,
+            [this](const lwr_controllers::msg::PoseRPY::SharedPtr msg) { command_inbox_.write(msg); });
+
+        return CallbackReturn::SUCCESS;
+    }
+
+    controller_interface::CallbackReturn OneTaskInverseKinematics::on_activate(const rclcpp_lifecycle::State & previous_state)
+    {
+        if (KinematicChainControllerBase::on_activate(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
         // get joint positions
-        for(int i=0; i < joint_handles_.size(); i++)
+        for(size_t i=0; i < joint_handles_.size(); i++)
         {
             joint_msr_states_.q(i) = joint_handles_[i].getPosition();
             joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -45,22 +56,20 @@ namespace lwr_controllers
         x_des_ = x_;
 
         cmd_flag_ = 0;
+        command_inbox_.reset();
 
-        sub_command_ = nh_.subscribe("command", 1, &OneTaskInverseKinematics::command, this);
-
-        return true;
+        return CallbackReturn::SUCCESS;
     }
 
-    void OneTaskInverseKinematics::starting(const ros::Time& time)
+    controller_interface::return_type OneTaskInverseKinematics::update(const rclcpp::Time& time, const rclcpp::Duration& period)
     {
+        (void)time;
 
-    }
-
-    void OneTaskInverseKinematics::update(const ros::Time& time, const ros::Duration& period)
-    {
+        if (auto msg = command_inbox_.take())
+            command(msg);
 
         // get joint positions
-        for(int i=0; i < joint_handles_.size(); i++)
+        for(size_t i=0; i < joint_handles_.size(); i++)
         {
             joint_msr_states_.q(i) = joint_handles_[i].getPosition();
         }
@@ -101,15 +110,15 @@ namespace lwr_controllers
                 joint_des_states_.qdot(i) = 0.0;
                 for (int k = 0; k < J_pinv_.cols(); k++)
                     joint_des_states_.qdot(i) += J_pinv_(i,k)*x_err_(k); //removed scaling factor of .7
-          
+
             }
 
             // integrating q_dot -> getting q (Euler method)
-            for (int i = 0; i < joint_handles_.size(); i++)
-                joint_des_states_.q(i) += period.toSec()*joint_des_states_.qdot(i);
+            for (size_t i = 0; i < joint_handles_.size(); i++)
+                joint_des_states_.q(i) += period.seconds()*joint_des_states_.qdot(i);
 
             // joint limits saturation
-            for (int i =0;  i < joint_handles_.size(); i++)
+            for (size_t i =0;  i < joint_handles_.size(); i++)
             {
                 if (joint_des_states_.q(i) < joint_limits_.min(i))
                     joint_des_states_.q(i) = joint_limits_.min(i);
@@ -119,19 +128,21 @@ namespace lwr_controllers
 
             if (Equal(x_, x_des_, 0.005))
             {
-                ROS_INFO("On target");
+                RCLCPP_INFO(logger(), "On target");
                 cmd_flag_ = 0;
             }
         }
 
         // set controls for joints
-        for (int i = 0; i < joint_handles_.size(); i++)
+        for (size_t i = 0; i < joint_handles_.size(); i++)
         {
             joint_handles_[i].setCommand(joint_des_states_.q(i));
         }
+
+        return controller_interface::return_type::OK;
     }
 
-    void OneTaskInverseKinematics::command(const lwr_controllers::PoseRPY::ConstPtr &msg)
+    void OneTaskInverseKinematics::command(const lwr_controllers::msg::PoseRPY::SharedPtr &msg)
     {
         KDL::Frame frame_des_;
 
@@ -162,7 +173,7 @@ namespace lwr_controllers
             break;
 
             default:
-            ROS_INFO("Wrong message ID");
+            RCLCPP_INFO(logger(), "Wrong message ID");
             return;
         }
 
@@ -171,4 +182,4 @@ namespace lwr_controllers
     }
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::OneTaskInverseKinematics, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::OneTaskInverseKinematics, controller_interface::ControllerInterface)

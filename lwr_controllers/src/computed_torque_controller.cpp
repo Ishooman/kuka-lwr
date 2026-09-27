@@ -1,18 +1,19 @@
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <math.h>
 
 #include <lwr_controllers/computed_torque_controller.h>
 
-namespace lwr_controllers 
+namespace lwr_controllers
 {
-	ComputedTorqueController::ComputedTorqueController() {}
+	ComputedTorqueController::ComputedTorqueController() : KinematicChainControllerBase(CommandType::EFFORT) {}
 	ComputedTorqueController::~ComputedTorqueController() {}
 
-	bool ComputedTorqueController::init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n)
+	controller_interface::CallbackReturn ComputedTorqueController::on_configure(const rclcpp_lifecycle::State & previous_state)
 	{
-        KinematicChainControllerBase<hardware_interface::EffortJointInterface>::init(robot, n);
-        
+        if (KinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
 		id_solver_.reset( new KDL::ChainDynParam( kdl_chain_, gravity_) );
 
 		cmd_states_.resize(kdl_chain_.getNrOfJoints());
@@ -25,16 +26,21 @@ namespace lwr_controllers
         joint_initial_states_.resize(kdl_chain_.getNrOfJoints());
         current_cmd_.resize(kdl_chain_.getNrOfJoints());
 
-		sub_posture_ = nh_.subscribe("command", 1, &ComputedTorqueController::command, this);
-		sub_gains_ = nh_.subscribe("set_gains", 1, &ComputedTorqueController::set_gains, this);
+		sub_posture_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>("~/command", 1,
+			[this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) { posture_inbox_.write(msg); });
+		sub_gains_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>("~/set_gains", 1,
+			[this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) { gains_inbox_.write(msg); });
 
-		return true;		
+		return CallbackReturn::SUCCESS;
 	}
 
-	void ComputedTorqueController::starting(const ros::Time& time)
+	controller_interface::CallbackReturn ComputedTorqueController::on_activate(const rclcpp_lifecycle::State & previous_state)
 	{
+        if (KinematicChainControllerBase::on_activate(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
   		// get joint positions
-  		for(size_t i=0; i<joint_handles_.size(); i++) 
+  		for(size_t i=0; i<joint_handles_.size(); i++)
   		{
 
   			Kp_(i) = 300.0;
@@ -46,17 +52,29 @@ namespace lwr_controllers
     	}
 
     	lambda = 0.1;	// lower values: flatter
-    	cmd_flag_ = 0;	
+    	cmd_flag_ = 0;
     	step_ = 0;
 
-    	ROS_INFO(" Number of joints in handle = %lu", joint_handles_.size() );
+    	posture_inbox_.reset();
 
+    	RCLCPP_INFO(logger(), " Number of joints in handle = %lu", joint_handles_.size() );
+
+    	return CallbackReturn::SUCCESS;
     }
 
-    void ComputedTorqueController::update(const ros::Time& time, const ros::Duration& period)
+    controller_interface::return_type ComputedTorqueController::update(const rclcpp::Time& time, const rclcpp::Duration& period)
     {
+        (void)time;
+        (void)period;
+
+        // process the new commands
+        if (auto msg = posture_inbox_.take())
+            command(msg);
+        if (auto msg = gains_inbox_.take())
+            set_gains(msg);
+
     	// get joint positions
-  		for(size_t i=0; i<joint_handles_.size(); i++) 
+  		for(size_t i=0; i<joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -73,7 +91,7 @@ namespace lwr_controllers
             double th = tanh(M_PI-lambda*step_);
             double ch = cosh(M_PI-lambda*step_);
             double sh2 = 1.0/(ch*ch);
-            
+
             for(size_t i=0; i<joint_handles_.size(); i++)
             {
                 // TODO: take into account also initial/final velocity and acceleration
@@ -88,7 +106,7 @@ namespace lwr_controllers
     		{
     			cmd_flag_ = 0;	//reset command flag
     			step_ = 0;
-    			ROS_INFO("Posture OK");
+    			RCLCPP_INFO(logger(), "Posture OK");
     		}
     	}
 
@@ -109,20 +127,22 @@ namespace lwr_controllers
         }
         tau_cmd_.data = M_.data * pid_cmd_.data;
         KDL::Add(tau_cmd_,cg_cmd_,tau_cmd_);
-        
+
         for(size_t i=0; i<joint_handles_.size(); i++)
         {
             joint_handles_[i].setCommand(tau_cmd_(i));
         }
+
+        return controller_interface::return_type::OK;
     }
 
-    void ComputedTorqueController::command(const std_msgs::Float64MultiArray::ConstPtr &msg)
+    void ComputedTorqueController::command(const std_msgs::msg::Float64MultiArray::SharedPtr &msg)
     {
     	if(msg->data.size() == 0)
-    		ROS_INFO("Desired configuration must be of dimension %lu", joint_handles_.size());
+    		RCLCPP_INFO(logger(), "Desired configuration must be of dimension %lu", joint_handles_.size());
     	else if(msg->data.size() != joint_handles_.size())
     	{
-    		ROS_ERROR("Posture message had the wrong size: %u", (unsigned int)msg->data.size());
+    		RCLCPP_ERROR(logger(), "Posture message had the wrong size: %u", (unsigned int)msg->data.size());
     		return;
     	}
     	else
@@ -137,7 +157,7 @@ namespace lwr_controllers
 
 	}
 
-	void ComputedTorqueController::set_gains(const std_msgs::Float64MultiArray::ConstPtr &msg)
+	void ComputedTorqueController::set_gains(const std_msgs::msg::Float64MultiArray::SharedPtr &msg)
 	{
 		if(msg->data.size() == 2*joint_handles_.size())
 		{
@@ -148,14 +168,14 @@ namespace lwr_controllers
 			}
 		}
 		else
-			ROS_INFO("Number of Joint handles = %lu", joint_handles_.size());
+			RCLCPP_INFO(logger(), "Number of Joint handles = %lu", joint_handles_.size());
 
-		ROS_INFO("Num of Joint handles = %lu, dimension of message = %lu", joint_handles_.size(), msg->data.size());
+		RCLCPP_INFO(logger(), "Num of Joint handles = %lu, dimension of message = %lu", joint_handles_.size(), msg->data.size());
 
-		ROS_INFO("New gains Kp: %.1lf, %.1lf, %.1lf %.1lf, %.1lf, %.1lf, %.1lf", Kp_(0), Kp_(1), Kp_(2), Kp_(3), Kp_(4), Kp_(5), Kp_(6));
-		ROS_INFO("New gains Kv: %.1lf, %.1lf, %.1lf %.1lf, %.1lf, %.1lf, %.1lf", Kv_(0), Kv_(1), Kv_(2), Kv_(3), Kv_(4), Kv_(5), Kv_(6));
+		RCLCPP_INFO(logger(), "New gains Kp: %.1lf, %.1lf, %.1lf %.1lf, %.1lf, %.1lf, %.1lf", Kp_(0), Kp_(1), Kp_(2), Kp_(3), Kp_(4), Kp_(5), Kp_(6));
+		RCLCPP_INFO(logger(), "New gains Kv: %.1lf, %.1lf, %.1lf %.1lf, %.1lf, %.1lf, %.1lf", Kv_(0), Kv_(1), Kv_(2), Kv_(3), Kv_(4), Kv_(5), Kv_(6));
 
 	}
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::ComputedTorqueController, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::ComputedTorqueController, controller_interface::ControllerInterface)

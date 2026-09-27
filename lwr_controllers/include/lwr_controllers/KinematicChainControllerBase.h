@@ -1,13 +1,14 @@
 #ifndef KINEMATIC_CHAIN_CONTROLLER_BASE_H
 #define KINEMATIC_CHAIN_CONTROLLER_BASE_H
 
-#include <control_msgs/JointControllerState.h> // TODO: state message for all controllers?
-
 #include <urdf/model.h>
 #include <lwr_hw/lwr_hw.h>
-#include <controller_interface/controller.h>
-#include <ros/node_handle.h>
-#include <ros/ros.h>
+#include <controller_interface/controller_interface.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/state.hpp>
+#include <realtime_tools/realtime_buffer.hpp>
+#include <realtime_tools/realtime_publisher.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <kdl/tree.hpp>
 #include <kdl/kdl.hpp>
@@ -19,24 +20,85 @@
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 
+#include <chrono>
+#include <limits>
+#include <memory>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace controller_interface
 {
-    template<typename JI>
-	class KinematicChainControllerBase: public Controller<JI>
+    /**
+     * Thin wrapper around the loaned ros2_control interfaces of a joint, to keep the ROS 1 API
+     * (getPosition(), getVelocity(), getEffort(), setCommand()) in the controllers.
+     */
+    struct JointHandle
+    {
+        std::string name;
+        const hardware_interface::LoanedStateInterface * position = nullptr;
+        const hardware_interface::LoanedStateInterface * velocity = nullptr;
+        const hardware_interface::LoanedStateInterface * effort = nullptr;
+        hardware_interface::LoanedCommandInterface * command = nullptr;
+
+        const std::string & getName() const { return name; }
+        double getPosition() const { return position ? position->get_value() : std::numeric_limits<double>::quiet_NaN(); }
+        double getVelocity() const { return velocity ? velocity->get_value() : std::numeric_limits<double>::quiet_NaN(); }
+        double getEffort() const { return effort ? effort->get_value() : std::numeric_limits<double>::quiet_NaN(); }
+        void setCommand(double command_value) { if (command) command->set_value(command_value); }
+    };
+
+    /**
+     * Hands the latest message received in a (non real-time) subscription callback over to the
+     * real-time update() loop. take() returns each new message once, and nullptr otherwise.
+     */
+    template<class MsgT>
+    class CommandInbox
+    {
+    public:
+        void write(const std::shared_ptr<MsgT> & msg) { buffer_.writeFromNonRT(msg); }
+        std::shared_ptr<MsgT> take()
+        {
+            std::shared_ptr<MsgT> msg = *buffer_.readFromRT();
+            if (!msg || msg == last_)
+                return nullptr;
+            last_ = msg;
+            return msg;
+        }
+        void reset() { buffer_.writeFromNonRT(nullptr); last_.reset(); }
+
+    private:
+        realtime_tools::RealtimeBuffer<std::shared_ptr<MsgT>> buffer_{nullptr};
+        std::shared_ptr<MsgT> last_;
+    };
+
+    /**
+     * Base class of the lwr controllers: it parses the URDF, builds the KDL chain between the
+     * root_name and tip_name parameters, reads the joint limits and gets the joint handles.
+     *
+     * The URDF is taken from the robot_description parameter of the controller or, if empty, from
+     * the (latched) topic given by the robot_description_topic parameter (default /robot_description).
+     */
+	class KinematicChainControllerBase: public ControllerInterface
 	{
 	public:
-		KinematicChainControllerBase() {}
+        // which command interface the controller claims on each joint of the chain
+        enum class CommandType { NONE, POSITION, EFFORT };
+
+		explicit KinematicChainControllerBase(CommandType command_type = CommandType::EFFORT, bool claim_impedance_interfaces = false)
+            : command_type_(command_type), claim_impedance_interfaces_(claim_impedance_interfaces) {}
 		~KinematicChainControllerBase() {}
 
-        bool init(JI *robot, ros::NodeHandle &n);
+        CallbackReturn on_init() override;
+        InterfaceConfiguration command_interface_configuration() const override;
+        InterfaceConfiguration state_interface_configuration() const override;
+        CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
+        CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;
+        CallbackReturn on_deactivate(const rclcpp_lifecycle::State & previous_state) override;
 
 	protected:
-		ros::NodeHandle nh_;
-
 		KDL::Chain kdl_chain_;
-        KDL::Vector gravity_; 
+        KDL::Vector gravity_;
         KDL::JntArrayAcc joint_msr_states_, joint_des_states_;  // joint states (measured and desired)
 
 		struct limits_
@@ -46,152 +108,39 @@ namespace controller_interface
 			KDL::JntArray center;
 		} joint_limits_;
 
-		std::vector<typename JI::ResourceHandleType> joint_handles_;
-        std::vector<typename JI::ResourceHandleType> joint_stiffness_handles_;
-        std::vector<typename JI::ResourceHandleType> joint_damping_handles_;
-        std::vector<typename JI::ResourceHandleType> joint_set_point_handles_;
-        
-        bool getHandles(JI *robot);
-        
-	};
-    
-    template <typename JI>
-    bool KinematicChainControllerBase<JI>::init(JI *robot, ros::NodeHandle &n)
-    {
-        nh_ = n;
+        std::vector<std::string> chain_joint_names_;
+		std::vector<JointHandle> joint_handles_;
+        std::vector<JointHandle> joint_stiffness_handles_;
+        std::vector<JointHandle> joint_damping_handles_;
+        std::vector<JointHandle> joint_set_point_handles_;
 
-        // get URDF and name of root and tip from the parameter server
-        std::string robot_description, root_name, tip_name;
+        bool getHandles();
 
-        if (!ros::param::search(n.getNamespace(),"robot_description", robot_description))
+        // parameter helpers (parameters in the yaml files are declared automatically, and integer values are accepted as double)
+        double getParamDouble(const std::string & name, double default_value);
+        std::string getParamString(const std::string & name, const std::string & default_value);
+
+        // publish from the real-time loop without blocking
+        template<class MsgT>
+        static void publishRT(const std::shared_ptr<realtime_tools::RealtimePublisher<MsgT>> & pub, const MsgT & msg)
         {
-            ROS_ERROR_STREAM("KinematicChainControllerBase: No robot description (URDF) found on parameter server ("<<n.getNamespace()<<"/robot_description)");
-            return false;
-        }
-
-        if (!nh_.getParam("root_name", root_name))
-        {
-            ROS_ERROR_STREAM("KinematicChainControllerBase: No root name found on parameter server ("<<n.getNamespace()<<"/root_name)");
-            return false;
-        }
-
-        if (!nh_.getParam("tip_name", tip_name))
-        {
-            ROS_ERROR_STREAM("KinematicChainControllerBase: No tip name found on parameter server ("<<n.getNamespace()<<"/tip_name)");
-            return false;
-        }
-     
-        // Get the gravity vector (direction and magnitude)
-        gravity_ = KDL::Vector::Zero();
-        gravity_(2) = -9.81;
-
-        // Construct an URDF model from the xml string
-        std::string xml_string;
-
-        if (n.hasParam(robot_description))
-            n.getParam(robot_description.c_str(), xml_string);
-        else
-        {
-            ROS_ERROR("Parameter %s not set, shutting down node...", robot_description.c_str());
-            n.shutdown();
-            return false;
-        }
-
-        if (xml_string.size() == 0)
-        {
-            ROS_ERROR("Unable to load robot model from parameter %s",robot_description.c_str());
-            n.shutdown();
-            return false;
-        }
-
-        ROS_DEBUG("%s content\n%s", robot_description.c_str(), xml_string.c_str());
-        
-        // Get urdf model out of robot_description
-        urdf::Model model;
-        if (!model.initString(xml_string))
-        {
-            ROS_ERROR("Failed to parse urdf file");
-            n.shutdown();
-            return false;
-        }
-        ROS_INFO("Successfully parsed urdf file");
-        
-        KDL::Tree kdl_tree_;
-        if (!kdl_parser::treeFromUrdfModel(model, kdl_tree_))
-        {
-            ROS_ERROR("Failed to construct kdl tree");
-            n.shutdown();
-            return false;
-        }
-
-        // Populate the KDL chain
-        if(!kdl_tree_.getChain(root_name, tip_name, kdl_chain_))
-        {
-            ROS_ERROR_STREAM("Failed to get KDL chain from tree: ");
-            ROS_ERROR_STREAM("  "<<root_name<<" --> "<<tip_name);
-            ROS_ERROR_STREAM("  Tree has "<<kdl_tree_.getNrOfJoints()<<" joints");
-            ROS_ERROR_STREAM("  Tree has "<<kdl_tree_.getNrOfSegments()<<" segments");
-            ROS_ERROR_STREAM("  The segments are:");
-
-            KDL::SegmentMap segment_map = kdl_tree_.getSegments();
-            KDL::SegmentMap::iterator it;
-
-            for( it=segment_map.begin(); it != segment_map.end(); it++ )
-              ROS_ERROR_STREAM( "    "<<(*it).first);
-
-            return false;
-        }
-
-        ROS_DEBUG("Number of segments: %d", kdl_chain_.getNrOfSegments());
-        ROS_DEBUG("Number of joints in chain: %d", kdl_chain_.getNrOfJoints());
-        
-        // Parsing joint limits from urdf model along kdl chain
-        boost::shared_ptr<const urdf::Link> link_ = model.getLink(tip_name);
-        boost::shared_ptr<const urdf::Joint> joint_;
-        joint_limits_.min.resize(kdl_chain_.getNrOfJoints());
-        joint_limits_.max.resize(kdl_chain_.getNrOfJoints());
-        joint_limits_.center.resize(kdl_chain_.getNrOfJoints());
-        int index;
-        
-        for (int i = 0; i < kdl_chain_.getNrOfJoints() && link_; i++)
-        {
-            joint_ = model.getJoint(link_->parent_joint->name);  
-            ROS_INFO("Getting limits for joint: %s", joint_->name.c_str());
-            index = kdl_chain_.getNrOfJoints() - i - 1;
-
-            joint_limits_.min(index) = joint_->limits->lower;
-            joint_limits_.max(index) = joint_->limits->upper;
-            joint_limits_.center(index) = (joint_limits_.min(index) + joint_limits_.max(index))/2;
-
-            link_ = model.getLink(link_->getParent()->name);
-        }
-
-        // Get joint handles for all of the joints in the chain
-        getHandles(robot);
-        
-        ROS_DEBUG("Number of joints in handle = %lu", joint_handles_.size() );
-        
-        joint_msr_states_.resize(kdl_chain_.getNrOfJoints());
-        joint_des_states_.resize(kdl_chain_.getNrOfJoints());
-
-        return true;
-    }
-    
-    template <typename JI>
-    bool KinematicChainControllerBase<JI>::getHandles(JI *robot)
-    {
-        for(std::vector<KDL::Segment>::const_iterator it = kdl_chain_.segments.begin(); it != kdl_chain_.segments.end(); ++it)
-        {
-            if ( it->getJoint().getType() != KDL::Joint::None )
+            if (pub && pub->trylock())
             {
-                joint_handles_.push_back(robot->getHandle(it->getJoint().getName()));
-                ROS_DEBUG("%s", it->getJoint().getName().c_str() );
+                pub->msg_ = msg;
+                pub->unlockAndPublish();
             }
-        }        
-        return true;
-    }
-    
-    
+        }
+
+        // get the robot description from the parameter or from the topic
+        std::string getRobotDescription();
+
+        rclcpp::Logger logger() const { return get_node()->get_logger(); }
+
+	private:
+        CommandType command_type_;
+        bool claim_impedance_interfaces_;
+	};
+
 }
 
 #endif

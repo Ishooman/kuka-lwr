@@ -1,11 +1,21 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-	<xacro:macro name="kuka_lwr_gazebo" params="name">
+	<!-- controllers_file is the absolute path of the controller manager parameters (controllers.yaml) -->
+	<xacro:macro name="kuka_lwr_gazebo" params="name controllers_file:=''">
 
+		<!-- the gazebo_ros2_control plugin runs the controller manager in the /${name} namespace
+		     and loads the lwr_hw/LWRHWGazebo hardware interface declared in the ros2_control tag -->
 		<gazebo>
-			<plugin name="${name}_lwr_hw_sim" filename="liblwr_hw_gazebo_plugin.so">
-				<robotNamespace>${name}</robotNamespace>
+			<plugin name="${name}_lwr_hw_sim" filename="libgazebo_ros2_control.so">
+				<ros>
+					<namespace>/${name}</namespace>
+				</ros>
+				<robot_param>robot_description</robot_param>
+				<robot_param_node>/robot_state_publisher</robot_param_node>
+				<xacro:if value="${controllers_file != ''}">
+					<parameters>${controllers_file}</parameters>
+				</xacro:if>
 			</plugin>
 		</gazebo>
 

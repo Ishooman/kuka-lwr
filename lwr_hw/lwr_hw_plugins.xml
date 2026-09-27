@@ -1,0 +1,16 @@
+<class_libraries>
+  <library path="lwr_hw_fri">
+    <class name="lwr_hw/LWRHWFRI" type="lwr_hw::LWRHWFRI" base_class_type="hardware_interface::SystemInterface">
+      <description>
+        Real KUKA LWR 4+ through the KUKA Fast Research Interface (remote side).
+      </description>
+    </class>
+  </library>
+  <library path="lwr_hw_fril">
+    <class name="lwr_hw/LWRHWFRIL" type="lwr_hw::LWRHWFRIL" base_class_type="hardware_interface::SystemInterface">
+      <description>
+        Real KUKA LWR 4+ through the Stanford FRI library (FRIL). Only available when built with LWR_HW_BUILD_FRIL=ON.
+      </description>
+    </class>
+  </library>
+</class_libraries>

@@ -1,40 +1,24 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="single_lwr_robot">
 
+	<!-- arguments, which hardware interface to use (gazebo, fri, fril or mock) and its settings -->
+	<xacro:arg name="hardware_interface" default="gazebo"/>
+	<xacro:arg name="controllers_file" default="$(find single_lwr_robot)/config/controllers.yaml"/>
+	<xacro:arg name="port" default="49939"/>
+	<xacro:arg name="ip" default="192.168.0.10"/>
+	<xacro:arg name="init_file" default="$(find single_lwr_robot)/config/980241-FRI-Driver.init"/>
+
 	<!-- Include all models -->
 	<xacro:include filename="$(find lwr_description)/model/kuka_lwr.urdf.xacro"/>
 
-	<!-- and assemble your robot -->
-	<link name="box">
-		<inertial>
-			<mass value="5.0"/>
-			<origin rpy="0 0 0" xyz="0 0 0"/>
-			<inertia ixx="0.01"
-             iyy="0.01"
-             izz="0.01"
-             ixy="0" iyz="0" ixz="0"/>
-		</inertial>
-		<visual>
-			<origin xyz="0 0 0.50" rpy="0 0 0"/>
-			<geometry>
-				<box size="1.0 1.0 1.0"/>
-			</geometry>
-		</visual>
-		<collision>
-			<origin xyz="0 0 0.50" rpy="0 0 0"/>
-			<geometry>
-				<box size="1.0 1.0 1.0"/>
-			</geometry>
-		</collision>
-	</link>
-
-	<gazebo reference="box">
-		<static>true</static>>
-	</gazebo>
+	<!-- and assemble your robot, the arm is fixed to the world (gazebo welds the "world" link to the ground) -->
+	<link name="world"/>
 
 	<!-- using the models -->
-	<xacro:kuka_lwr parent="box" name="lwr">
-		<origin xyz="0 0 1" rpy="0 0 0"/>
+	<!-- the name MUST match the name used in the controllers configuration (lwr_a1_joint, ...) -->
+	<xacro:kuka_lwr parent="world" name="lwr" hardware_interface="$(arg hardware_interface)" controllers_file="$(arg controllers_file)"
+	                port="$(arg port)" ip="$(arg ip)" init_file="$(arg init_file)">
+		<origin xyz="0 0 0" rpy="0 0 0"/>
 	</xacro:kuka_lwr>
 
 </robot>

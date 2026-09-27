@@ -2,35 +2,34 @@
 #define LWR_CONTROLLERS__ONE_TASK_INVERSE_KINEMATICS_H
 
 #include "KinematicChainControllerBase.h"
-#include "lwr_controllers/PoseRPY.h"
+#include "lwr_controllers/msg/pose_rpy.hpp"
 
-#include <visualization_msgs/Marker.h>
-#include <geometry_msgs/PoseStamped.h>
+#include <visualization_msgs/msg/marker.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/chainiksolvervel_pinv.hpp>
 #include <kdl/chainiksolverpos_nr_jl.hpp>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/condition.hpp>
+#include <Eigen/Core>
 #include <sstream>
 
 namespace lwr_controllers
 {
-	class OneTaskInverseKinematics: public controller_interface::KinematicChainControllerBase<hardware_interface::PositionJointInterface>
+	class OneTaskInverseKinematics: public controller_interface::KinematicChainControllerBase
 	{
 	public:
 		OneTaskInverseKinematics();
 		~OneTaskInverseKinematics();
 
-		bool init(hardware_interface::PositionJointInterface *robot, ros::NodeHandle &n);
-		void starting(const ros::Time& time);
-		void update(const ros::Time& time, const ros::Duration& period);
-		void command(const lwr_controllers::PoseRPY::ConstPtr &msg);
+		CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
+		CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;
+		controller_interface::return_type update(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+		void command(const lwr_controllers::msg::PoseRPY::SharedPtr &msg);
 
 	private:
-		ros::Subscriber sub_command_;
-		ros::Subscriber sub_gains_;
+		rclcpp::Subscription<lwr_controllers::msg::PoseRPY>::SharedPtr sub_command_;
+		controller_interface::CommandInbox<lwr_controllers::msg::PoseRPY> command_inbox_;
 
 		KDL::Frame x_;		//current pose
 		KDL::Frame x_des_;	//desired pose
@@ -51,13 +50,13 @@ namespace lwr_controllers
 		} quat_curr_, quat_des_;
 
 		KDL::Vector v_temp_;
-		
+
 		int cmd_flag_;
-		
-		boost::scoped_ptr<KDL::ChainJntToJacSolver> jnt_to_jac_solver_;
-		boost::scoped_ptr<KDL::ChainFkSolverPos_recursive> fk_pos_solver_;
-		boost::scoped_ptr<KDL::ChainIkSolverVel_pinv> ik_vel_solver_;
-		boost::scoped_ptr<KDL::ChainIkSolverPos_NR_JL> ik_pos_solver_;
+
+		std::unique_ptr<KDL::ChainJntToJacSolver> jnt_to_jac_solver_;
+		std::unique_ptr<KDL::ChainFkSolverPos_recursive> fk_pos_solver_;
+		std::unique_ptr<KDL::ChainIkSolverVel_pinv> ik_vel_solver_;
+		std::unique_ptr<KDL::ChainIkSolverPos_NR_JL> ik_pos_solver_;
 	};
 
 }

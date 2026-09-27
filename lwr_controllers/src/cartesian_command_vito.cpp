@@ -1,21 +1,23 @@
-#include "ros/ros.h"
-#include <lwr_controllers/PoseRPY.h>
+#include <rclcpp/rclcpp.hpp>
+#include <lwr_controllers/msg/pose_rpy.hpp>
 #include <kdl/tree.hpp>
 #include <Eigen/Dense>
-#include <tf/transform_listener.h>
-#include <tf/transform_datatypes.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #define PI 3.141592653
 
-ros::Subscriber sub_terminal;
+rclcpp::Subscription<lwr_controllers::msg::PoseRPY>::SharedPtr sub_terminal;
 
-ros::Publisher pub_right;
-ros::Publisher pub_left;
+rclcpp::Publisher<lwr_controllers::msg::PoseRPY>::SharedPtr pub_right;
+rclcpp::Publisher<lwr_controllers::msg::PoseRPY>::SharedPtr pub_left;
 
 Eigen::Matrix<double,3,1> p_global_r, p_global_l, p_right, p_left;
 
-tf::StampedTransform transform_right;
-tf::StampedTransform transform_left;
+tf2::Transform transform_right;
+tf2::Transform transform_left;
 
 double L = 0.1;
 
@@ -50,7 +52,7 @@ Eigen::Matrix<double,4,1> rot_quat(Eigen::Matrix<double,3,3> r) {
 	return temp;
 }
 
-void gposeCallback(const lwr_controllers::PoseRPY::ConstPtr& msg) {
+void gposeCallback(const lwr_controllers::msg::PoseRPY::SharedPtr msg) {
 	KDL::Rotation rot_msg = KDL::Rotation::EulerZYX(msg->orientation.yaw, msg->orientation.pitch, msg->orientation.roll);
 	double t1,t2,t3,t4;
 	rot_msg.GetQuaternion(t1,t2,t3,t4);
@@ -90,8 +92,8 @@ void gposeCallback(const lwr_controllers::PoseRPY::ConstPtr& msg) {
 	KDL::Rotation q_r = KDL::Rotation::Quaternion(r(0),r(1),r(2),r(3));
 	KDL::Rotation q_l = KDL::Rotation::Quaternion(l(0),l(1),l(2),l(3));
 	
-	lwr_controllers::PoseRPY msg_right;
-	lwr_controllers::PoseRPY msg_left;
+	lwr_controllers::msg::PoseRPY msg_right;
+	lwr_controllers::msg::PoseRPY msg_left;
 	
 	q_r.GetEulerZYX(msg_right.orientation.yaw, msg_right.orientation.pitch, msg_right.orientation.roll);
 	q_l.GetEulerZYX(msg_left.orientation.yaw, msg_left.orientation.pitch, msg_left.orientation.roll);
@@ -106,14 +108,14 @@ void gposeCallback(const lwr_controllers::PoseRPY::ConstPtr& msg) {
 	msg_right.position.y = p_right(1);
 	msg_right.position.z = p_right(2);
 	
-	pub_right.publish(msg_right);
-	pub_left.publish(msg_left);
+	pub_right->publish(msg_right);
+	pub_left->publish(msg_left);
 }
 
 int main(int argc, char **argv) {
 	// Initialize the node
-	ros::init(argc, argv, "command_vito");
-	ros::NodeHandle node;
+	rclcpp::init(argc, argv);
+	auto node = std::make_shared<rclcpp::Node>("command_vito");
 
 // 	rot_des_l <<   0, -1, 0,
 // 				   0,  0, 1,
@@ -121,23 +123,23 @@ int main(int argc, char **argv) {
 // 	rot_des_r <<  1, 0,  0,
 // 				  0, 0, -1,
 // 				  0, 1,  0;
-	
-	tf::TransformListener listener_right;
-	tf::TransformListener listener_left;
+
+	tf2_ros::Buffer tf_buffer(node->get_clock());
+	tf2_ros::TransformListener listener(tf_buffer);
 	transform_right.setIdentity();
 	transform_left.setIdentity();
-	sleep(5.0);
-	while (transform_right.getOrigin().getX() == 0 && transform_left.getOrigin().getX() == 0) {
+	rclcpp::sleep_for(std::chrono::seconds(5));
+	while (rclcpp::ok() && transform_right.getOrigin().getX() == 0 && transform_left.getOrigin().getX() == 0) {
 		try{
-			listener_right.lookupTransform("world", "right_arm_base_link", ros::Time(0), transform_right);
-			listener_left.lookupTransform("world", "left_arm_base_link", ros::Time(0), transform_left);
-		} catch (tf::TransformException &ex) {
-			ROS_ERROR("%s",ex.what());
-			ros::Duration(1.0).sleep();
+			tf2::fromMsg(tf_buffer.lookupTransform("world", "right_arm_base_link", tf2::TimePointZero).transform, transform_right);
+			tf2::fromMsg(tf_buffer.lookupTransform("world", "left_arm_base_link", tf2::TimePointZero).transform, transform_left);
+		} catch (tf2::TransformException &ex) {
+			RCLCPP_ERROR(node->get_logger(), "%s",ex.what());
+			rclcpp::sleep_for(std::chrono::seconds(1));
 			continue;
 		}
 	}
-	
+
 	rot_right = quat_rot(transform_right.inverse().getRotation().getX(),
 						 transform_right.inverse().getRotation().getY(),
 						 transform_right.inverse().getRotation().getZ(),
@@ -149,21 +151,17 @@ int main(int argc, char **argv) {
 	pos_right << transform_right.inverse().getOrigin().getX(),
 				 transform_right.inverse().getOrigin().getY(),
 				 transform_right.inverse().getOrigin().getZ();
-	pos_left << transform_left.inverse().getOrigin().getX(), 
+	pos_left << transform_left.inverse().getOrigin().getX(),
 				transform_left.inverse().getOrigin().getY(),
 				transform_left.inverse().getOrigin().getZ();
-	
-	sub_terminal = node.subscribe("/global_pose", 30, &gposeCallback);
 
-    pub_right = node.advertise<lwr_controllers::PoseRPY>("/right_arm/joint_impedance_controller/command", 30);
-	pub_left = node.advertise<lwr_controllers::PoseRPY>("/left_arm/joint_impedance_controller/command", 30);
-	
-	sleep(0.1);
-	// Loop at a specified frequency, publishing movement commands until we shut down
-	ros::Rate rate(30);
+	sub_terminal = node->create_subscription<lwr_controllers::msg::PoseRPY>("/global_pose", 30, &gposeCallback);
 
-	while (ros::ok()) {
-		ros::spinOnce();
-		rate.sleep();
-	}
+    pub_right = node->create_publisher<lwr_controllers::msg::PoseRPY>("/right_arm/joint_impedance_controller/command", 30);
+	pub_left = node->create_publisher<lwr_controllers::msg::PoseRPY>("/left_arm/joint_impedance_controller/command", 30);
+
+	// spin until we shut down
+	rclcpp::spin(node);
+	rclcpp::shutdown();
+	return 0;
 }

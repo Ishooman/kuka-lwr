@@ -1,7 +1,7 @@
 
 #include <lwr_controllers/inverse_dynamics_controller.h>
 
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <urdf/model.h>
 #include <kdl/tree.hpp>
 #include <kdl_parser/kdl_parser.hpp>
@@ -12,11 +12,13 @@ namespace lwr_controllers
 {
 
   InverseDynamicsController::InverseDynamicsController()
-    : robot_description_("")
+    : KinematicChainControllerBase(CommandType::EFFORT)
+      ,robot_description_("")
       ,root_name_("")
       ,tip_name_("")
       ,joint_names_()
-      ,id_solver_(NULL)
+      ,n_dof_(0)
+      ,id_solver_(nullptr)
       ,ext_wrenches_()
       ,joint_states_()
       ,torques_()
@@ -24,12 +26,15 @@ namespace lwr_controllers
 
   InverseDynamicsController::~InverseDynamicsController()
   {
-    ext_wrench_sub_.shutdown();
+    ext_wrench_sub_.reset();
   }
 
-  bool InverseDynamicsController::init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n)
+  controller_interface::CallbackReturn InverseDynamicsController::on_configure(const rclcpp_lifecycle::State & previous_state)
   {
-    KinematicChainControllerBase<hardware_interface::EffortJointInterface>::init(robot, n);
+    if (KinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS)
+      return CallbackReturn::ERROR;
+
+    n_dof_ = kdl_chain_.getNrOfJoints();
 
     //Create inverse dynamics solver
     id_solver_.reset( new KDL::ChainIdSolver_RNE( kdl_chain_, gravity_) );
@@ -43,20 +48,26 @@ namespace lwr_controllers
     torques_.data.setZero();
 
     // Subscribe to external wrench topic
-    ext_wrench_sub_ = nh_.subscribe<geometry_msgs::WrenchStamped>(
-        "ext_wrench", 1,
-        &InverseDynamicsController::ext_wrench_cb, this);
+    ext_wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+        "~/ext_wrench", 1,
+        [this](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) { ext_wrench_inbox_.write(msg); });
 
-    return true;
+    return CallbackReturn::SUCCESS;
   }
 
-  void InverseDynamicsController::update(const ros::Time& time, const ros::Duration& period)
+  controller_interface::return_type InverseDynamicsController::update(const rclcpp::Time& time, const rclcpp::Duration& period)
   {
+    (void)time;
+    (void)period;
+
+    if (auto msg = ext_wrench_inbox_.take())
+      ext_wrench_cb(msg);
+
     // Read the positions/velocities
     for(unsigned int j=0; j<n_dof_; j++) {
       joint_states_.q(j) = joint_handles_[j].getPosition();
       joint_states_.qdot(j) = joint_handles_[j].getVelocity();
-      // JointStateInterface has no acceleration support 
+      // JointStateInterface has no acceleration support
       // joint_states_.qdotdot(j) = joint_handles_[j].getAcceleration();
       joint_states_.qdotdot(j) = 0.0;
     }
@@ -72,7 +83,7 @@ namespace lwr_controllers
             ext_wrenches_,
             torques_) != 0)
     {
-      ROS_ERROR("Could not compute joint torques! Setting all torques to zero!");
+      RCLCPP_ERROR(logger(), "Could not compute joint torques! Setting all torques to zero!");
       KDL::SetToZero(torques_);
     }
 
@@ -81,14 +92,16 @@ namespace lwr_controllers
       	joint_handles_[j].setCommand(torques_(j));
     	//joint_handles_[j].setCommand(0);
     }
+
+    return controller_interface::return_type::OK;
   }
 
   void InverseDynamicsController::ext_wrench_cb(
-      const geometry_msgs::WrenchStampedConstPtr &wrench_msg)
+      const geometry_msgs::msg::WrenchStamped::SharedPtr &wrench_msg)
   {
     // TODO: Transform wrench into appropriate frame (probably local frame for each link)
 
-    // Convert to KDL 
+    // Convert to KDL
     KDL::Wrench wrench(
         KDL::Vector(wrench_msg->wrench.force.x,
                     wrench_msg->wrench.force.y,
@@ -103,5 +116,5 @@ namespace lwr_controllers
 
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::InverseDynamicsController, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::InverseDynamicsController, controller_interface::ControllerInterface)
 

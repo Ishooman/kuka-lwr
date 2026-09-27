@@ -1,20 +1,20 @@
-
 #include <lwr_controllers/dynamic_sliding_mode_controller_task_space.h>
 #include <utils/pseudo_inversion.h>
 #include <utils/skew_symmetric.h>
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <Eigen/LU>
 #include <math.h>
 
-namespace lwr_controllers 
+namespace lwr_controllers
 {
 	DynamicSlidingModeControllerTaskSpace::DynamicSlidingModeControllerTaskSpace() {}
 	DynamicSlidingModeControllerTaskSpace::~DynamicSlidingModeControllerTaskSpace() {}
 
-	bool DynamicSlidingModeControllerTaskSpace::init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n)
+	controller_interface::CallbackReturn DynamicSlidingModeControllerTaskSpace::on_configure(const rclcpp_lifecycle::State & previous_state)
 	{
-        KinematicChainControllerBase<hardware_interface::EffortJointInterface>::init(robot, n);
+        if (PIDKinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
 
 		jnt_to_jac_solver_.reset(new KDL::ChainJntToJacSolver(kdl_chain_));
 		id_solver_.reset(new KDL::ChainDynParam(kdl_chain_,gravity_));
@@ -41,20 +41,28 @@ namespace lwr_controllers
 		lambda_.resize(kdl_chain_.getNrOfJoints());
 		k_.resize(kdl_chain_.getNrOfJoints());
 
-		sub_command_ = nh_.subscribe("command", 1, &DynamicSlidingModeControllerTaskSpace::command, this);
+		sub_command_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>("~/command", 1,
+			[this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) { command_inbox_.write(msg); });
 
-		pub_error_ = nh_.advertise<std_msgs::Float64MultiArray>("error", 1000);
-		pub_pose_ = nh_.advertise<std_msgs::Float64MultiArray>("pose", 1000);
-		pub_traj_ = nh_.advertise<std_msgs::Float64MultiArray>("traj", 1000);
-		pub_marker_ = nh_.advertise<visualization_msgs::Marker>("marker",1000);
+		pub_error_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/error", 1000);
+		pub_pose_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/pose", 1000);
+		pub_traj_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/traj", 1000);
+		pub_marker_ = get_node()->create_publisher<visualization_msgs::msg::Marker>("~/marker",1000);
+		rt_pub_error_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_error_);
+		rt_pub_pose_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_pose_);
+		rt_pub_traj_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_traj_);
+		rt_pub_marker_ = std::make_shared<realtime_tools::RealtimePublisher<visualization_msgs::msg::Marker>>(pub_marker_);
 
-		return true;
+		return CallbackReturn::SUCCESS;
 	}
 
-	void DynamicSlidingModeControllerTaskSpace::starting(const ros::Time& time)
+	controller_interface::CallbackReturn DynamicSlidingModeControllerTaskSpace::on_activate(const rclcpp_lifecycle::State & previous_state)
 	{
+        if (PIDKinematicChainControllerBase::on_activate(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -73,18 +81,26 @@ namespace lwr_controllers
 
     	cmd_flag_ = 0;
     	step_ = 0;
+    	command_inbox_.reset();
+
+    	return CallbackReturn::SUCCESS;
 	}
 
-	void DynamicSlidingModeControllerTaskSpace::update(const ros::Time& time, const ros::Duration& period)
+	controller_interface::return_type DynamicSlidingModeControllerTaskSpace::update(const rclcpp::Time& time, const rclcpp::Duration& period)
 	{
+		(void)time;
+
+		if (auto msg = command_inbox_.take())
+			command(msg);
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
-    	} 
+    	}
 
-    	if (cmd_flag_) 
+    	if (cmd_flag_)
     	{
 	    	// computing forward kinematics
 		    fk_pos_solver_->JntToCart(joint_msr_states_.q,x_);
@@ -97,8 +113,8 @@ namespace lwr_controllers
 
 		    // computing end-effector position/orientation error w.r.t. desired frame
 		    x_err_ = diff(x_,x_des_);
-		    
-		    /* Trying quaternions, it seems to work better 
+
+		    /* Trying quaternions, it seems to work better
 
 		    // end-effector position/orientation error
 	    	x_err_.vel = (x_des_.p - x_.p);
@@ -116,7 +132,7 @@ namespace lwr_controllers
 	    			v_temp_(i) += skew_(i,k)*(quat_curr_.v(k));
 	    	}
 
-	    	x_err_.rot = (quat_curr_.a*quat_des_.v - quat_des_.a*quat_curr_.v) - v_temp_; 
+	    	x_err_.rot = (quat_curr_.a*quat_des_.v - quat_des_.a*quat_curr_.v) - v_temp_;
 			*/
 	    	// clearing error msg before publishing
     		msg_err_.data.clear();
@@ -129,33 +145,33 @@ namespace lwr_controllers
 
 			joint_des_states_.qdot.data = J_pinv_*e_ref_;
 
-			joint_des_states_.q.data = joint_msr_states_.q.data + period.toSec()*joint_des_states_.qdot.data;
+			joint_des_states_.q.data = joint_msr_states_.q.data + period.seconds()*joint_des_states_.qdot.data;
 
 	    	// computing S
 	    	S_.data = (joint_msr_states_.qdot.data - joint_des_states_.qdot.data) + alpha_.data.cwiseProduct(joint_msr_states_.q.data - joint_des_states_.q.data);
 
 			//for (int i = 0; i < joint_handles_.size(); i++)
 				//S_(i) = (joint_msr_states_.qdot(i) - joint_des_states_.qdot(i)) + alpha_(i)*tanh(lambda_(i)*(joint_msr_states_.q(i) - joint_des_states_.q(i)));
-	    	
+
 	    	// saving S0 on the first step
 	    	if (step_ == 0)
 	    		S0_ = S_;
 
 	    	// computing Sd
-	    	for (int i = 0; i < joint_handles_.size(); i++)
-	    		Sd_(i) = S0_(i)*exp(-k_(i)*(step_*period.toSec()));
+	    	for (size_t i = 0; i < joint_handles_.size(); i++)
+	    		Sd_(i) = S0_(i)*exp(-k_(i)*(step_*period.seconds()));
 
 	    	Sq_.data = S_.data + Sd_.data;//- Sd_.data;
 
 	    	// computing sigma_dot as sgn(Sq)
-	    	for (int i = 0; i < joint_handles_.size(); i++)
-	    		sigma_dot_(i) = -(Sq_(i) < 0) + (Sq_(i) > 0); 
+	    	for (size_t i = 0; i < joint_handles_.size(); i++)
+	    		sigma_dot_(i) = -(Sq_(i) < 0) + (Sq_(i) > 0);
 
 	    	// integrating sigma_dot
-	    	sigma_.data += period.toSec()*sigma_dot_.data;
+	    	sigma_.data += period.seconds()*sigma_dot_.data;
 
 	    	//for (int i = 0; i < joint_handles_.size(); i++)
-	    		//sigma_(i) += period.toSec()*pow(Sq_(i),0.5);
+	    		//sigma_(i) += period.seconds()*pow(Sq_(i),0.5);
 
 	    	// computing Sr
 	    	Sr_.data = Sq_.data + gamma_.data.cwiseProduct(sigma_.data);
@@ -167,36 +183,36 @@ namespace lwr_controllers
 
 	    	if (Equal(x_,x_des_,0.05))
 	    	{
-	    		
-	    		ROS_INFO("On target");
+
+	    		RCLCPP_INFO(logger(), "On target");
 	    		cmd_flag_ = 0;
-	    		return;
+	    		return controller_interface::return_type::OK;
 	    	}
-	    } 
+	    }
 
     	// set controls for joints
-    	for (int i = 0; i < joint_handles_.size(); i++)
-    	{	
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
+    	{
     		if (!cmd_flag_)
-    			tau_(i) = PIDs_[i].computeCommand(joint_des_states_.q(i) - joint_msr_states_.q(i),period);//Kd_(i)*(alpha_(i)*(joint_des_states_.q(i) - joint_msr_states_.q(i)) + (joint_des_states_.qdot(i) - joint_msr_states_.qdot(i))) ;
+    			tau_(i) = computeCommand(PIDs_[i], joint_des_states_.q(i) - joint_msr_states_.q(i),period);//Kd_(i)*(alpha_(i)*(joint_des_states_.q(i) - joint_msr_states_.q(i)) + (joint_des_states_.qdot(i) - joint_msr_states_.qdot(i))) ;
 
 	    	joint_handles_[i].setCommand(tau_(i));
     	}
 
     	// publishing markers for visualization in rviz
-    	pub_marker_.publish(msg_marker_);
+    	publishRT(rt_pub_marker_, msg_marker_);
     	msg_id_++;
 
 	    // publishing error for all tasks as an array of ntasks*6
-	    pub_error_.publish(msg_err_);
+	    publishRT(rt_pub_error_, msg_err_);
 	    // publishing actual and desired trajectory for each task (links) as an array of ntasks*3
-	    pub_pose_.publish(msg_pose_);
-	    pub_traj_.publish(msg_traj_);
-	    ros::spinOnce();
+	    publishRT(rt_pub_pose_, msg_pose_);
+	    publishRT(rt_pub_traj_, msg_traj_);
 
+	    return controller_interface::return_type::OK;
 	}
 
-	void DynamicSlidingModeControllerTaskSpace::command(const std_msgs::Float64MultiArray::ConstPtr &msg)
+	void DynamicSlidingModeControllerTaskSpace::command(const std_msgs::msg::Float64MultiArray::SharedPtr &msg)
 	{
 		if (msg->data.size() == 6)
 		{
@@ -213,19 +229,19 @@ namespace lwr_controllers
 		}
 		else
 		{
-			ROS_INFO("Tasks parameters are [x,y,z,roll,pitch,yaw]");
+			RCLCPP_INFO(logger(), "Tasks parameters are [x,y,z,roll,pitch,yaw]");
 			return;
-		}	
+		}
 	}
 
 	void DynamicSlidingModeControllerTaskSpace::set_marker(KDL::Frame x, int id)
-	{			
+	{
 				msg_marker_.header.frame_id = "world";
-				msg_marker_.header.stamp = ros::Time();
+				msg_marker_.header.stamp = builtin_interfaces::msg::Time();
 				msg_marker_.ns = "end_effector";
 				msg_marker_.id = id;
-				msg_marker_.type = visualization_msgs::Marker::SPHERE;
-				msg_marker_.action = visualization_msgs::Marker::ADD;
+				msg_marker_.type = visualization_msgs::msg::Marker::SPHERE;
+				msg_marker_.action = visualization_msgs::msg::Marker::ADD;
 				msg_marker_.pose.position.x = x.p(0);
 				msg_marker_.pose.position.y = x.p(1);
 				msg_marker_.pose.position.z = x.p(2);
@@ -239,8 +255,8 @@ namespace lwr_controllers
 				msg_marker_.color.a = 1.0;
 				msg_marker_.color.r = 0.0;
 				msg_marker_.color.g = 1.0;
-				msg_marker_.color.b = 0.0;	
+				msg_marker_.color.b = 0.0;
 	}
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::DynamicSlidingModeControllerTaskSpace, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::DynamicSlidingModeControllerTaskSpace, controller_interface::ControllerInterface)

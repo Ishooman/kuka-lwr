@@ -1,18 +1,19 @@
 #include <lwr_controllers/dynamic_sliding_mode_controller.h>
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <math.h>
 #include <Eigen/LU>
 #include <utils/pseudo_inversion.h>
 
-namespace lwr_controllers 
+namespace lwr_controllers
 {
-	DynamicSlidingModeController::DynamicSlidingModeController() {}
+	DynamicSlidingModeController::DynamicSlidingModeController() : KinematicChainControllerBase(CommandType::EFFORT) {}
 	DynamicSlidingModeController::~DynamicSlidingModeController() {}
 
-	bool DynamicSlidingModeController::init(hardware_interface::EffortJointInterface *robot, ros::NodeHandle &n)
+	controller_interface::CallbackReturn DynamicSlidingModeController::on_configure(const rclcpp_lifecycle::State & previous_state)
 	{
-        KinematicChainControllerBase<hardware_interface::EffortJointInterface>::init(robot, n);
+        if (KinematicChainControllerBase::on_configure(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
 
 		jnt_to_jac_solver_.reset(new KDL::ChainJntToJacSolver(kdl_chain_));
 		id_solver_.reset(new KDL::ChainDynParam(kdl_chain_,gravity_));
@@ -40,21 +41,29 @@ namespace lwr_controllers
 		lambda_.resize(kdl_chain_.getNrOfJoints());
 		k_.resize(kdl_chain_.getNrOfJoints());
 
-		sub_command_ = nh_.subscribe("command", 1, &DynamicSlidingModeController::command, this);
-// 		sub_gains_ = nh_.subscribe("set_gains", 1, &DynamicSlidingModeController::set_gains, this);
+		sub_command_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>("~/command", 1,
+			[this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) { command_inbox_.write(msg); });
+// 		sub_gains_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>("~/set_gains", 1, ...);
 
-		pub_error_ = nh_.advertise<std_msgs::Float64MultiArray>("error", 1000);
-		pub_pose_ = nh_.advertise<std_msgs::Float64MultiArray>("pose", 1000);
-		pub_traj_ = nh_.advertise<std_msgs::Float64MultiArray>("traj", 1000);
-		pub_marker_ = nh_.advertise<visualization_msgs::Marker>("marker",1000);
+		pub_error_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/error", 1000);
+		pub_pose_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/pose", 1000);
+		pub_traj_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/traj", 1000);
+		pub_marker_ = get_node()->create_publisher<visualization_msgs::msg::Marker>("~/marker",1000);
+		rt_pub_error_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_error_);
+		rt_pub_pose_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_pose_);
+		rt_pub_traj_ = std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(pub_traj_);
+		rt_pub_marker_ = std::make_shared<realtime_tools::RealtimePublisher<visualization_msgs::msg::Marker>>(pub_marker_);
 
-		return true;
+		return CallbackReturn::SUCCESS;
 	}
 
-	void DynamicSlidingModeController::starting(const ros::Time& time)
+	controller_interface::CallbackReturn DynamicSlidingModeController::on_activate(const rclcpp_lifecycle::State & previous_state)
 	{
+        if (KinematicChainControllerBase::on_activate(previous_state) != CallbackReturn::SUCCESS)
+            return CallbackReturn::ERROR;
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
@@ -72,38 +81,46 @@ namespace lwr_controllers
     	SetToZero(joint_des_states_);
 
     	Kp = 200;
-    	Ki = 1; 
+    	Ki = 1;
     	Kd = 5;
 
 //     	for (int i = 0; i < PIDs_.size(); i++)
 //     		PIDs_[i].initPid(Kp,Ki,Kd,0.1,-0.1);
-    	//ROS_INFO("PIDs gains are: Kp = %f, Ki = %f, Kd = %f",Kp,Ki,Kd);
+    	//RCLCPP_INFO(logger(), "PIDs gains are: Kp = %f, Ki = %f, Kd = %f",Kp,Ki,Kd);
 
     	cmd_flag_ = 0;
     	step_ = 0;
+    	command_inbox_.reset();
+
+    	return CallbackReturn::SUCCESS;
 	}
 
-	void DynamicSlidingModeController::update(const ros::Time& time, const ros::Duration& period)
+	controller_interface::return_type DynamicSlidingModeController::update(const rclcpp::Time& time, const rclcpp::Duration& period)
 	{
+		(void)time;
+
+		if (auto msg = command_inbox_.take())
+			command(msg);
+
 		// get joint positions
-  		for(int i=0; i < joint_handles_.size(); i++) 
+  		for(size_t i=0; i < joint_handles_.size(); i++)
   		{
     		joint_msr_states_.q(i) = joint_handles_[i].getPosition();
     		joint_msr_states_.qdot(i) = joint_handles_[i].getVelocity();
-    	} 
+    	}
 
     	double freq_ = 1.0;
 
-    	joint_des_states_.q(3) = sin(freq_/2*step_*period.toSec());
-    	joint_des_states_.qdot(3) = freq_/2*cos(freq_/2*step_*period.toSec());
-    	joint_des_states_.q(1) = sin(freq_*step_*period.toSec());
-    	joint_des_states_.qdot(1) = freq_*cos(freq_*step_*period.toSec());
+    	joint_des_states_.q(3) = sin(freq_/2*step_*period.seconds());
+    	joint_des_states_.qdot(3) = freq_/2*cos(freq_/2*step_*period.seconds());
+    	joint_des_states_.q(1) = sin(freq_*step_*period.seconds());
+    	joint_des_states_.qdot(1) = freq_*cos(freq_*step_*period.seconds());
 
     	msg_pose_.data.clear();
     	msg_traj_.data.clear();
 
     	// updating messages for plot visualization
-    	for (int i = 0; i < joint_handles_.size(); i++)
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
     	{
     		msg_pose_.data.push_back(joint_msr_states_.q(i));
     		msg_traj_.data.push_back(joint_des_states_.q(i));
@@ -120,17 +137,17 @@ namespace lwr_controllers
     		S0_ = S_;
 
     	// computing Sd
-    	for (int i = 0; i < joint_handles_.size(); i++)
-    		Sd_(i) = S0_(i)*exp(-k_(i)*(step_*period.toSec()));
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
+    		Sd_(i) = S0_(i)*exp(-k_(i)*(step_*period.seconds()));
 
     	Sq_.data = S_.data - Sd_.data;
 
     	// computing sigma_dot as sgn(Sq)
-    	for (int i = 0; i < joint_handles_.size(); i++)
-    		sigma_dot_(i) = -(Sq_(i) < 0) + (Sq_(i) > 0); 
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
+    		sigma_dot_(i) = -(Sq_(i) < 0) + (Sq_(i) > 0);
 
     	// integrating sigma_dot
-    	sigma_.data += period.toSec()*sigma_dot_.data;
+    	sigma_.data += period.seconds()*sigma_dot_.data;
 
     	// computing Sr
     	Sr_.data = Sq_.data + gamma_.data.cwiseProduct(sigma_.data);
@@ -138,52 +155,52 @@ namespace lwr_controllers
     	// computing tau
     	tau_.data = -Kd_.data.cwiseProduct(Sr_.data);
 
-    	step_++; 
+    	step_++;
 
     	// set controls for joints
-    	for (int i = 0; i < joint_handles_.size(); i++)
-    	{	
+    	for (size_t i = 0; i < joint_handles_.size(); i++)
+    	{
 	    	joint_handles_[i].setCommand(tau_(i));
     	}
 
     	// publishing markers for visualization in rviz
-    	pub_marker_.publish(msg_marker_);
+    	publishRT(rt_pub_marker_, msg_marker_);
     	msg_id_++;
 
 	    // publishing error for all tasks as an array of ntasks*6
-	    pub_error_.publish(msg_err_);
+	    publishRT(rt_pub_error_, msg_err_);
 	    // publishing actual and desired trajectory for each joint specified
-	    pub_pose_.publish(msg_pose_);
-	    pub_traj_.publish(msg_traj_);
-	    ros::spinOnce();
+	    publishRT(rt_pub_pose_, msg_pose_);
+	    publishRT(rt_pub_traj_, msg_traj_);
 
+	    return controller_interface::return_type::OK;
 	}
 
-	void DynamicSlidingModeController::command(const std_msgs::Float64MultiArray::ConstPtr &msg)
+	void DynamicSlidingModeController::command(const std_msgs::msg::Float64MultiArray::SharedPtr &msg)
 	{
-
+		(void)msg;
 	}
 
-// 	void DynamicSlidingModeController::set_gains(const std_msgs::Float64MultiArray::ConstPtr &msg)
+// 	void DynamicSlidingModeController::set_gains(const std_msgs::msg::Float64MultiArray::SharedPtr &msg)
 // 	{
 // 		if(msg->data.size() == 3)
 // 		{
 // 			for(int i = 0; i < PIDs_.size(); i++)
 // 				PIDs_[i].setGains(msg->data[0],msg->data[1],msg->data[2],0.3,-0.3);
-// 			ROS_INFO("New gains set: Kp = %f, Ki = %f, Kd = %f",msg->data[0],msg->data[1],msg->data[2]);
+// 			RCLCPP_INFO(logger(), "New gains set: Kp = %f, Ki = %f, Kd = %f",msg->data[0],msg->data[1],msg->data[2]);
 // 		}
 // 		else
-// 			ROS_INFO("PIDs gains needed are 3 (Kp, Ki and Kd)");
+// 			RCLCPP_INFO(logger(), "PIDs gains needed are 3 (Kp, Ki and Kd)");
 // 	}
 
 	void DynamicSlidingModeController::set_marker(KDL::Frame x, int id)
-	{			
+	{
 				msg_marker_.header.frame_id = "world";
-				msg_marker_.header.stamp = ros::Time();
+				msg_marker_.header.stamp = builtin_interfaces::msg::Time();
 				msg_marker_.ns = "end_effector";
 				msg_marker_.id = id;
-				msg_marker_.type = visualization_msgs::Marker::SPHERE;
-				msg_marker_.action = visualization_msgs::Marker::ADD;
+				msg_marker_.type = visualization_msgs::msg::Marker::SPHERE;
+				msg_marker_.action = visualization_msgs::msg::Marker::ADD;
 				msg_marker_.pose.position.x = x.p(0);
 				msg_marker_.pose.position.y = x.p(1);
 				msg_marker_.pose.position.z = x.p(2);
@@ -197,8 +214,8 @@ namespace lwr_controllers
 				msg_marker_.color.a = 1.0;
 				msg_marker_.color.r = 0.0;
 				msg_marker_.color.g = 1.0;
-				msg_marker_.color.b = 0.0;	
+				msg_marker_.color.b = 0.0;
 	}
 }
 
-PLUGINLIB_EXPORT_CLASS(lwr_controllers::DynamicSlidingModeController, controller_interface::ControllerBase)
+PLUGINLIB_EXPORT_CLASS(lwr_controllers::DynamicSlidingModeController, controller_interface::ControllerInterface)

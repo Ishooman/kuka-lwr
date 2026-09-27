@@ -1,141 +1,134 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(lwr_hw)
 
-find_package(catkin REQUIRED COMPONENTS
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+
+option(LWR_HW_BUILD_FRIL "Build the Stanford FRI library (FRIL) hardware interface (downloads https://github.com/iocroblab/fril)" ON)
+option(LWR_HW_BUILD_GAZEBO "Build the Gazebo (classic) hardware interface" ON)
+
+find_package(ament_cmake REQUIRED)
+find_package(angles REQUIRED)
+find_package(control_toolbox REQUIRED)
+find_package(hardware_interface REQUIRED)
+find_package(kdl_parser REQUIRED)
+find_package(orocos_kdl REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(urdf REQUIRED)
+
+set(THIS_PACKAGE_DEPENDS
+  angles
   control_toolbox
-  controller_interface
-  controller_manager
   hardware_interface
-  realtime_tools
-  joint_limits_interface
-  roscpp
-  tf
-  urdf
-  cmake_modules
-  pluginlib
   kdl_parser
-  transmission_interface
-  gazebo_ros
+  orocos_kdl
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
   std_msgs
-)
-
-add_definitions (-std=c++11)
-
-catkin_package(
-  CATKIN_DEPENDS
-    control_toolbox
-    controller_interface
-    controller_manager
-    hardware_interface
-    realtime_tools
-    joint_limits_interface
-    roscpp
-    tf
-    urdf
-    cmake_modules
-    pluginlib
-    kdl_parser
-    transmission_interface
-    gazebo_ros
-    std_msgs
-  INCLUDE_DIRS include
-  LIBRARIES ${PROJECT_NAME} lwr_hw_gazebo_plugin friremote
+  urdf
 )
 
 ###########
 ## Build ##
 ###########
 
-include_directories(include
-  ${Boost_INCLUDE_DIR}
-  ${catkin_INCLUDE_DIRS}
-)
-
 ## LWR HW BASE CLASS
-add_library(${PROJECT_NAME}
-  include/${PROJECT_NAME}/lwr_hw.h
+add_library(${PROJECT_NAME} SHARED
   src/lwr_hw.cpp
 )
-target_link_libraries(${PROJECT_NAME}
-  ${catkin_LIBRARIES}
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
+ament_target_dependencies(${PROJECT_NAME} PUBLIC ${THIS_PACKAGE_DEPENDS})
 
-## REAL 
+## REAL
 # KUKA FRI library
-add_library(friremote
+add_library(friremote SHARED
   src/fri/friremote.cpp
-  src//fri/friudp.cpp
+  src/fri/friudp.cpp
 )
-set_target_properties(friremote PROPERTIES COMPILE_DEFINITIONS HAVE_SOCKLEN_T)
-# lwr hw fri node
-add_executable(lwr_hw_fri_node  src/lwr_hw_fri_node.cpp
-  include/${PROJECT_NAME}/lwr_hw_fri.hpp
+target_include_directories(friremote PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
-add_dependencies(lwr_hw_fri_node
-  friremote
-  ${PROJECT_NAME} 
-)
-target_link_libraries(lwr_hw_fri_node
-  friremote
-  ${PROJECT_NAME}
-  ${catkin_LIBRARIES}
-)
+target_compile_definitions(friremote PRIVATE HAVE_SOCKLEN_T)
 
-# Standford FRILibrary (support in PROGRESS)
-message(WARNING "ATTENTION: This project supports the fork of the Standford library found in https://github.com/iocroblab/fril, and install the libraries in your catkin workspace, not in the system")
-include(ExternalProject)
-ExternalProject_Add(FRILibrary
-  GIT_REPOSITORY https://github.com/iocroblab/fril.git
-  GIT_TAG a10695fad32ba8315817c42020e2dbc66f4505dd
-  BUILD_COMMAND make
-  BUILD_IN_SOURCE 1
-  CONFIGURE_COMMAND cmake -DCMAKE_INSTALL_PREFIX=${CATKIN_DEVEL_PREFIX}
-  INSTALL_COMMAND make install
+# lwr hw fri plugin (replaces the ROS 1 lwr_hw_fri_node, it is loaded by the ros2_control_node)
+add_library(lwr_hw_fri SHARED
+  src/lwr_hw_fri.cpp
 )
-# lwr hw fril node
-include_directories(${CATKIN_DEVEL_PREFIX}/include/fril)
-link_directories(${CATKIN_DEVEL_PREFIX}/lib)
-add_executable(lwr_hw_fril_node  src/lwr_hw_fril_node.cpp
-  include/${PROJECT_NAME}/lwr_hw_fril.hpp
-)
-add_dependencies(lwr_hw_fril_node
-  FRILibrary
-  ${PROJECT_NAME} 
-)
-target_link_libraries(lwr_hw_fril_node
-  fril
-  ${PROJECT_NAME}
-  ${catkin_LIBRARIES}
-)
+target_link_libraries(lwr_hw_fri PUBLIC ${PROJECT_NAME} friremote)
+ament_target_dependencies(lwr_hw_fri PUBLIC ${THIS_PACKAGE_DEPENDS})
+set(LWR_HW_PLUGIN_TARGETS lwr_hw_fri)
+
+# Standford FRILibrary
+if(LWR_HW_BUILD_FRIL)
+  message(STATUS "ATTENTION: This project supports the fork of the Standford library found in https://github.com/iocroblab/fril, it is downloaded and built with the package (disable it with -DLWR_HW_BUILD_FRIL=OFF)")
+  include(ExternalProject)
+  set(FRIL_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/fril_install)
+  ExternalProject_Add(FRILibrary
+    GIT_REPOSITORY https://github.com/iocroblab/fril.git
+    GIT_TAG a10695fad32ba8315817c42020e2dbc66f4505dd
+    BUILD_COMMAND $(MAKE)
+    BUILD_IN_SOURCE 1
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -DCMAKE_INSTALL_PREFIX=${FRIL_INSTALL_DIR} -DCMAKE_POSITION_INDEPENDENT_CODE=ON .
+    INSTALL_COMMAND $(MAKE) install
+  )
+  # lwr hw fril plugin
+  add_library(lwr_hw_fril SHARED
+    src/lwr_hw_fril.cpp
+  )
+  add_dependencies(lwr_hw_fril FRILibrary)
+  target_include_directories(lwr_hw_fril PRIVATE ${FRIL_INSTALL_DIR}/include/fril)
+  target_link_directories(lwr_hw_fril PRIVATE ${FRIL_INSTALL_DIR}/lib)
+  target_link_libraries(lwr_hw_fril PUBLIC ${PROJECT_NAME} fril)
+  ament_target_dependencies(lwr_hw_fril PUBLIC ${THIS_PACKAGE_DEPENDS})
+  list(APPEND LWR_HW_PLUGIN_TARGETS lwr_hw_fril)
+  install(DIRECTORY ${FRIL_INSTALL_DIR}/lib/ DESTINATION lib)
+endif()
+
+pluginlib_export_plugin_description_file(hardware_interface lwr_hw_plugins.xml)
 
 ## SIMULATION
-# lwr hw sim gazebo plugin 
-find_package(gazebo REQUIRED)
-include_directories(${GAZEBO_INCLUDE_DIRS})
-link_directories(${GAZEBO_LIBRARY_DIRS})
-add_library(lwr_hw_gazebo_plugin  src/lwr_hw_gazebo_plugin.cpp
-  include/${PROJECT_NAME}/lwr_hw_gazebo.hpp
-)
-add_dependencies(lwr_hw_gazebo_plugin
-  ${PROJECT_NAME}
-)
-target_link_libraries(lwr_hw_gazebo_plugin
-  ${PROJECT_NAME}
-  ${catkin_LIBRARIES}
-  ${GAZEBO_LIBRARIES}
-)
+# lwr hw sim gazebo plugin, loaded by gazebo_ros2_control
+if(LWR_HW_BUILD_GAZEBO)
+  find_package(gazebo_dev REQUIRED)
+  find_package(gazebo_ros REQUIRED)
+  find_package(gazebo_ros2_control REQUIRED)
+  add_library(lwr_hw_gazebo_plugin SHARED
+    src/lwr_hw_gazebo.cpp
+  )
+  target_link_libraries(lwr_hw_gazebo_plugin PUBLIC ${PROJECT_NAME})
+  ament_target_dependencies(lwr_hw_gazebo_plugin PUBLIC ${THIS_PACKAGE_DEPENDS} gazebo_dev gazebo_ros gazebo_ros2_control)
+  list(APPEND LWR_HW_PLUGIN_TARGETS lwr_hw_gazebo_plugin)
+  pluginlib_export_plugin_description_file(gazebo_ros2_control lwr_hw_gazebo_plugins.xml)
+endif()
 
 ## INSTALLATION
-install(TARGETS ${PROJECT_NAME} lwr_hw_gazebo_plugin friremote
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION})
+install(TARGETS ${PROJECT_NAME} friremote
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
-install(TARGETS lwr_hw_fri_node
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+# plugins are loaded at runtime, they are not exported
+install(TARGETS ${LWR_HW_PLUGIN_TARGETS}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
-install(DIRECTORY launch/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch)
+install(DIRECTORY include/
+  DESTINATION include)
 
-install(DIRECTORY include/cartesian_hardware_interface/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
+install(DIRECTORY krl doc
+  DESTINATION share/${PROJECT_NAME})
+
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_DEPENDS})
+ament_package()

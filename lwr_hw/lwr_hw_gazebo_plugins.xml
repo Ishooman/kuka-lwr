@@ -1,0 +1,7 @@
+<library path="lwr_hw_gazebo_plugin">
+  <class name="lwr_hw/LWRHWGazebo" type="lwr_hw::LWRHWGazebo" base_class_type="gazebo_ros2_control::GazeboSystemInterface">
+    <description>
+      Simulated KUKA LWR 4+ in Gazebo (classic), to be loaded by the gazebo_ros2_control plugin.
+    </description>
+  </class>
+</library>

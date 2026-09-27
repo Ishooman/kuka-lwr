@@ -1,70 +1,70 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(lwr_controllers)
 
-find_package(catkin REQUIRED COMPONENTS
-  controller_interface
-  control_msgs
-  geometry_msgs
-  forward_command_controller
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(angles REQUIRED)
+find_package(control_toolbox REQUIRED)
+find_package(controller_interface REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(hardware_interface REQUIRED)
+find_package(kdl_parser REQUIRED)
+find_package(lwr_hw REQUIRED)
+find_package(orocos_kdl REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(realtime_tools REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(urdf REQUIRED)
+find_package(visualization_msgs REQUIRED)
+
+set(THIS_PACKAGE_DEPENDS
+  angles
   control_toolbox
-  realtime_tools
-  urdf
-  roscpp
-  kdl_parser
-  message_generation
-  cmake_modules
-  kdl_conversions
-  sensor_msgs
-  std_msgs
-  lwr_hw
-  tf_conversions
-)
-
-add_definitions (-fpermissive -std=c++11)
-
-include_directories(include ${Boost_INCLUDE_DIR} ${catkin_INCLUDE_DIRS})
-
-link_directories(${catkin_LIBRARY_DIRS})
-
-add_message_files(
-   FILES
-   PoseRPY.msg
-   RPY.msg
-   MultiPriorityTask.msg
-   ArmState.msg
-   CartesianImpedancePoint.msg
-   Stiffness.msg
-)
-add_service_files(
-  FILES
-  SetCartesianImpedanceCommand.srv
-)
-
-generate_messages(
-  DEPENDENCIES
-  std_msgs
+  controller_interface
   geometry_msgs
+  hardware_interface
+  kdl_parser
+  lwr_hw
+  orocos_kdl
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  realtime_tools
   sensor_msgs
+  std_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+  urdf
+  visualization_msgs
 )
 
-catkin_package(
-  CATKIN_DEPENDS
-    controller_interface
-    control_msgs
-    geometry_msgs
-    control_toolbox
-    realtime_tools
-    urdf
-    forward_command_controller
-    kdl_parser
-    message_runtime
-    lwr_hw
-  INCLUDE_DIRS include
-  LIBRARIES ${PROJECT_NAME}
+rosidl_generate_interfaces(${PROJECT_NAME}
+  msg/PoseRPY.msg
+  msg/RPY.msg
+  msg/MultiPriorityTask.msg
+  msg/ArmState.msg
+  msg/CartesianImpedancePoint.msg
+  msg/Stiffness.msg
+  srv/SetCartesianImpedanceCommand.srv
+  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-add_library(${PROJECT_NAME}
-  src/joint_impedance_controller.cpp	
+# the controllers plugin library (the ${PROJECT_NAME} target name is taken by the interfaces)
+add_library(${PROJECT_NAME}_plugin SHARED
+  src/joint_impedance_controller.cpp
   src/inverse_dynamics_controller.cpp
   src/computed_torque_controller.cpp
   src/one_task_inverse_kinematics.cpp
@@ -80,21 +80,36 @@ add_library(${PROJECT_NAME}
   src/cartesian_impedance_controller.cpp
   src/KinematicChainControllerBase.cpp
 )
+target_include_directories(${PROJECT_NAME}_plugin PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(${PROJECT_NAME}_plugin PUBLIC "${cpp_typesupport_target}" Eigen3::Eigen)
+ament_target_dependencies(${PROJECT_NAME}_plugin PUBLIC ${THIS_PACKAGE_DEPENDS})
 
-add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}_gencpp)
+pluginlib_export_plugin_description_file(controller_interface lwr_controllers_plugins.xml)
 
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
+# helper node to command the two arms of the vito robot with a single pose
+add_executable(cartesian_command_vito src/cartesian_command_vito.cpp)
+target_link_libraries(cartesian_command_vito "${cpp_typesupport_target}" Eigen3::Eigen)
+ament_target_dependencies(cartesian_command_vito rclcpp orocos_kdl tf2 tf2_geometry_msgs tf2_ros)
 
+install(DIRECTORY include/
+  DESTINATION include)
 
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
+install(TARGETS ${PROJECT_NAME}_plugin
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
-install(TARGETS ${PROJECT_NAME}
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-  )
+install(TARGETS cartesian_command_vito
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
 
-install(FILES lwr_controllers_plugins.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
 
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_DEPENDS} rosidl_default_runtime)
+ament_package()
