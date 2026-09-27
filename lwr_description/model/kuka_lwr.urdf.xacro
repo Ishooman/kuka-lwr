@@ -15,8 +15,10 @@
 	<xacro:property name="link_mass" value="2.35"/>
     <xacro:property name="wrist_mass" value="1.1"/>
     <xacro:property name="tip_mass" value="0.25"/>
+	<xacro:property name="tool_mass" value="0.5"/>	<!-- set very arbitrarily /-->
 	<xacro:property name="velocity_scale" value="1"/>
 	<xacro:property name="effort_scale" value="1"/>
+	<xacro:property name="tool_length" value="0.1353"/> <!-- set to match result of SNS paper /-->
 
 	<xacro:property name="max_stiffness" value="5000"/>
 	<xacro:property name="min_stiffness" value="0"/>
@@ -399,6 +401,35 @@
 			<origin xyz="0 0 0" rpy="0 0 ${M_PI}"/>
 			<geometry>
 				<cylinder radius="0.04" length="0.05"/>
+			</geometry>
+			</collision>
+		</link>
+
+		<!-- Tool: Stick mounted on the flange. The tool frame is at its tip. -->
+		<joint name="${name}_tool_joint" type="fixed">
+			<origin xyz="0 0 ${tool_length}" rpy="0 0 0"/>
+			<parent link="${name}_7_link"/>
+			<child link="${name}_tool_link"/>
+		</joint>
+
+		<link name="${name}_tool_link">
+			<inertial>
+				<mass value="${tool_mass}"/>
+				<origin xyz="0 0 0.05"/>
+				<xacro:cuboid_inertia_def length="0.02" width="0.02" height="${tool_length}" mass="${tool_mass}"/>
+			</inertial>
+			<visual>
+				<origin xyz="0 0 ${-tool_length/2}" rpy="0 0 0"/>
+				<geometry>
+					<cylinder radius="0.01" length="${tool_length}"/>
+				</geometry>
+			<material name="Kuka/DarkGrey"/>
+			</visual>
+
+			<collision>
+			<origin xyz="0 0 ${-tool_length/2}" rpy="0 0 0"/>
+			<geometry>
+				<cylinder radius="0.01" length="${tool_length}"/>
 			</geometry>
 			</collision>
 		</link>

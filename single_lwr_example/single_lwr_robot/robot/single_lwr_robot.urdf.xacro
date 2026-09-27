@@ -18,7 +18,7 @@
 	<!-- the name MUST match the name used in the controllers configuration (lwr_a1_joint, ...) -->
 	<xacro:kuka_lwr parent="world" name="lwr" hardware_interface="$(arg hardware_interface)" controllers_file="$(arg controllers_file)"
 	                port="$(arg port)" ip="$(arg ip)" init_file="$(arg init_file)">
-		<origin xyz="0 0 0" rpy="0 0 0"/>
+		<origin xyz="0 0 0.0125" rpy="0 0 0"/>	<!-- set to match result of SNS paper /-->
 	</xacro:kuka_lwr>
 
 </robot>

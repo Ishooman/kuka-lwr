@@ -59,6 +59,11 @@
 			<material>Gazebo/Grey</material>
 		</gazebo>
 
+		<gazebo reference="${name}_tool_link">
+			<gravity>true</gravity>
+			<material>Gazebo/Grey</material>
+		</gazebo>
+
 	</xacro:macro>
 
 </robot>
